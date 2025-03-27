@@ -93,13 +93,39 @@ document.addEventListener('DOMContentLoaded', function() {
     const sendMessage = document.getElementById('send-message');
     
     // DeepSeek API 配置
-    const DEEPSEEK_API_KEY = 'YOUR_DEEPSEEK_API_KEY'; // 请在.env文件中配置你的API密钥
+    // 注意：在生产环境中，API密钥应该存储在服务器端，而不是客户端
+    // 这里只是为了演示，实际上API密钥的处理由proxy.js完成
+    // 不在客户端设置API密钥，完全依赖服务器端的环境变量
     const PROXY_API_URL = 'http://localhost:3003/api/chat';
     
     // 用于存储对话历史
     let conversationHistory = [
         { role: "system", content: "你是呈祥的AI助手，你的任务是帮助回答用户关于呈祥的问题。呈祥是一名前端开发者和UI设计师，同时也是一名摄影爱好者。他擅长HTML5、CSS3、JavaScript、UI设计和响应式设计等技术。用户可以通过网站底部的电子邮箱或电话联系呈祥。请保持友好、专业的态度，并用简明的语言回答用户问题。" }
     ];
+
+    // 检查服务器健康状态
+    async function checkServerHealth() {
+        try {
+            const response = await fetch('http://localhost:3003/health');
+            if (response.ok) {
+                console.log('服务器运行正常');
+                return true;
+            } else {
+                console.error('服务器健康检查失败');
+                return false;
+            }
+        } catch (error) {
+            console.error('无法连接到服务器:', error);
+            return false;
+        }
+    }
+    
+    // 初始化时检查服务器状态
+    checkServerHealth().then(isHealthy => {
+        if (!isHealthy) {
+            addMessage('警告：无法连接到AI助手服务器。请确保服务器正在运行。', 'ai');
+        }
+    });
 
     // 打开助手对话框
     function openAssistant() {
@@ -231,11 +257,19 @@ document.addEventListener('DOMContentLoaded', function() {
         conversationHistory.push({ role: "user", content: message });
         
         try {
+            // 检查服务器健康状态
+            const isServerHealthy = await checkServerHealth();
+            if (!isServerHealthy) {
+                // 从对话历史中移除失败的用户消息，避免重复
+                conversationHistory.pop();
+                return '无法连接到AI助手服务器。请确保服务器正在运行或联系呈祥获取帮助。';
+            }
+            
+            console.log('发送请求到代理服务器...');
             const response = await fetch(PROXY_API_URL, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${DEEPSEEK_API_KEY}`
                 },
                 body: JSON.stringify({
                     model: 'deepseek-chat',
@@ -248,10 +282,48 @@ document.addEventListener('DOMContentLoaded', function() {
             if (!response.ok) {
                 const errorData = await response.json();
                 console.error('DeepSeek API 错误:', errorData);
-                throw new Error('API请求失败');
+                
+                // 从对话历史中移除失败的用户消息，避免重复
+                conversationHistory.pop();
+                
+                // 提取更具体的错误信息
+                let errorMessage = '抱歉，我遇到了一些技术问题。';
+                
+                // 检查认证错误
+                if (errorData.error && 
+                    (errorData.error.type === 'invalid_request_error' || 
+                     errorData.error.type === 'authentication_error' ||
+                     errorData.error.message && errorData.error.message.includes('Authentication') ||
+                     errorData.error.message && errorData.error.message.includes('auth'))) {
+                    
+                    errorMessage = '抱歉，API密钥认证失败。这可能是因为：\n' +
+                                   '1. API密钥格式不正确\n' +
+                                   '2. API密钥已过期或无效\n' +
+                                   '3. DeepSeek账户余额不足\n\n' +
+                                   '请联系呈祥更新API密钥。';
+                } else if (errorData.error) {
+                    if (errorData.error.message) {
+                        errorMessage += ` 错误信息: ${errorData.error.message}`;
+                    }
+                    if (errorData.error.type) {
+                        errorMessage += ` (类型: ${errorData.error.type})`;
+                    }
+                    errorMessage += ' 请稍后再试或者直接联系呈祥。';
+                }
+                
+                return errorMessage;
             }
             
             const data = await response.json();
+            if (!data.choices || !data.choices[0] || !data.choices[0].message) {
+                console.error('无效的API响应格式:', data);
+                
+                // 从对话历史中移除失败的用户消息，避免重复
+                conversationHistory.pop();
+                
+                return '抱歉，收到了无效的响应格式。请联系呈祥检查API配置。';
+            }
+            
             const aiResponse = data.choices[0].message.content;
             
             // 添加AI回复到对话历史
@@ -260,7 +332,11 @@ document.addEventListener('DOMContentLoaded', function() {
             return aiResponse;
         } catch (error) {
             console.error('调用DeepSeek API时出错:', error);
-            return '抱歉，我遇到了一些技术问题。请稍后再试或者直接联系呈祥。';
+            
+            // 从对话历史中移除失败的用户消息，避免重复
+            conversationHistory.pop();
+            
+            return `抱歉，我遇到了一些技术问题: ${error.message}。请稍后再试或者直接联系呈祥。`;
         }
     }
     
